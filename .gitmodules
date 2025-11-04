@@ -1,6 +1,3 @@
 [submodule "ProstT5"]
 	path = ProstT5
 	url = git@github.com:mheinzinger/ProstT5.git
-[submodule "esm"]
-	path = esm
-	url = git@github.com:facebookresearch/esm.git
