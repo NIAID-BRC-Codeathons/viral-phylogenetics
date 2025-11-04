@@ -1,0 +1,33 @@
+name: polyprotein_minimal
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+
+dependencies:
+  # Core Python
+  - python=3.9
+  - pip
+
+  # Essential ML libraries only
+  - pytorch-cpu  # CPU-only version for testing
+  - numpy
+  - scikit-learn
+  - pandas
+
+  # Essential HuggingFace
+  - transformers
+
+  # Bioinformatics
+  - biopython
+
+  # Utilities
+  - tqdm
+  - requests
+
+  # Development
+  - jupyter
+
+  # Pip dependencies
+  - pip:
+    - esm  # ESM protein language models

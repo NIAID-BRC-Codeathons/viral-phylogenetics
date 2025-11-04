@@ -1,0 +1,41 @@
+{
+  "model": {
+    "esm_model_name": "esm3_sm_open_v1",
+    "embedding_dim": 1536,
+    "hidden_dims": [512, 256, 128],
+    "dropout": 0.3,
+    "use_batch_norm": true
+  },
+  "training": {
+    "batch_size": 32,
+    "learning_rate": 0.001,
+    "epochs": 50,
+    "patience": 10,
+    "min_delta": 0.001,
+    "weight_decay": 1e-5,
+    "class_weight_method": "balanced"
+  },
+  "data": {
+    "max_sequence_length": 5000,
+    "validation_split": 0.2,
+    "random_seed": 42,
+    "shuffle": true,
+    "num_workers": 4
+  },
+  "evaluation": {
+    "threshold": 0.5,
+    "metrics": ["precision", "recall", "f1", "auroc", "auprc"],
+    "save_predictions": true
+  },
+  "device": {
+    "use_cuda": true,
+    "cuda_device": 0,
+    "mixed_precision": false
+  },
+  "logging": {
+    "log_level": "INFO",
+    "save_model_every": 5,
+    "plot_training_curves": true,
+    "log_embeddings": false
+  }
+}

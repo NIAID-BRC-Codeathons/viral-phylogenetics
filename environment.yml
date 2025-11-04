@@ -1,0 +1,62 @@
+name: polyprotein_cleavage
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - huggingface
+  - defaults
+
+dependencies:
+  # Core Python
+  - python=3.9
+  - pip
+
+  # Deep Learning Framework
+  - pytorch=2.0.*
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.8
+
+  # ESM and HuggingFace
+  - transformers>=4.21.0
+  - tokenizers
+  - datasets
+  - accelerate
+
+  # Scientific Computing
+  - numpy>=1.21.0
+  - scipy
+  - pandas
+  - scikit-learn
+
+  # Bioinformatics
+  - biopython
+  - biotite
+
+  # Data Visualization
+  - matplotlib
+  - seaborn
+  - plotly
+
+  # Progress bars and utilities
+  - tqdm
+  - requests
+  - urllib3
+
+  # Development tools
+  - jupyter
+  - ipython
+  - pytest
+  - flake8
+  - black
+
+  # Optional: CUDA toolkit for GPU support
+  - cudatoolkit=11.8
+
+  # Pip dependencies not available in conda
+  - pip:
+    - esm  # Facebook ESM protein language models
+    - fair-esm  # Alternative ESM package
+    - wandb  # Experiment tracking (optional)
+    - tensorboard  # Logging
+    - py3Dmol  # 3D visualization (optional)
