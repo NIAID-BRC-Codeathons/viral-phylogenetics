@@ -21,12 +21,116 @@ import numpy as np
 import json
 import requests
 import time
+import argparse
 from dataclasses import dataclass
 from tqdm import tqdm
+
+# LoRA imports
+try:
+    import loralib as lora
+    LORA_AVAILABLE = True
+except ImportError:
+    LORA_AVAILABLE = False
+    print("⚠️  LoRA library not available. Install with: pip install loralib")
 
 # ESM imports
 from esm.models.esmc import ESMC
 from esm.sdk.api import ESMProtein, LogitsConfig, ESMCInferenceClient
+
+
+def apply_lora_to_esmc(model: ESMC,
+                       lora_rank: int = 16,
+                       lora_alpha: int = 32,
+                       target_modules: List[str] = None) -> ESMC:
+    """
+    Apply LoRA (Low-Rank Adaptation) to ESMC model
+    
+    Args:
+        model: ESMC model to apply LoRA to
+        lora_rank: Rank of the LoRA adaptation
+        lora_alpha: LoRA scaling parameter
+        target_modules: List of module names to apply LoRA to
+                       (default: attention projection layers)
+    
+    Returns:
+        ESMC model with LoRA layers applied
+    """
+    if not LORA_AVAILABLE:
+        raise ImportError("LoRA library not available. "
+                         "Install with: pip install loralib")
+    
+    if target_modules is None:
+        # Default to attention projection layers in transformer
+        target_modules = ['q_proj', 'k_proj', 'v_proj', 'o_proj']
+    
+    print(f"Applying LoRA with rank={lora_rank}, alpha={lora_alpha}")
+    print(f"Target modules: {target_modules}")
+    
+    # Apply LoRA to transformer layers
+    for name, module in model.named_modules():
+        for target in target_modules:
+            if target in name and isinstance(module, nn.Linear):
+                # Replace Linear layer with LoRA Linear layer
+                parent_name = '.'.join(name.split('.')[:-1])
+                child_name = name.split('.')[-1]
+                
+                if parent_name:
+                    parent_module = model.get_submodule(parent_name)
+                else:
+                    parent_module = model
+                
+                # Create LoRA layer with same dimensions
+                lora_layer = lora.Linear(
+                    module.in_features,
+                    module.out_features,
+                    r=lora_rank,
+                    lora_alpha=lora_alpha,
+                    bias=module.bias is not None
+                )
+                
+                # Copy original weights
+                lora_layer.weight.data.copy_(module.weight.data)
+                if module.bias is not None:
+                    lora_layer.bias.data.copy_(module.bias.data)
+                
+                # Replace the module
+                setattr(parent_module, child_name, lora_layer)
+                print(f"  Applied LoRA to: {name}")
+    
+    # Mark only LoRA parameters as trainable
+    lora.mark_only_lora_as_trainable(model)
+    
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() 
+                          if p.requires_grad)
+    
+    print(f"Total parameters: {total_params:,}")
+    print(f"Trainable parameters: {trainable_params:,}")
+    print(f"Trainable %: {100 * trainable_params / total_params:.2f}%")
+    
+    return model
+
+
+def merge_lora_weights(model: ESMC) -> ESMC:
+    """
+    Merge LoRA weights into the base model
+    
+    Args:
+        model: ESMC model with LoRA layers
+        
+    Returns:
+        Model with LoRA weights merged
+    """
+    if not LORA_AVAILABLE:
+        raise ImportError("LoRA library not available")
+        
+    print("Merging LoRA weights into base model...")
+    for module in model.modules():
+        if isinstance(module, lora.Linear):
+            module.merge_weights()
+    
+    return model
 
 
 @dataclass
@@ -210,11 +314,33 @@ class PolyproteinCleavagePredictor:
     def __init__(self,
                  esm_model: Union[ESMC, ESMCInferenceClient],
                  device: str = "cuda",
-                 embedding_dim: int = 1152):  # ESMC-600M default
+                 embedding_dim: int = 1152,  # ESMC-600M default
+                 use_lora: bool = False,
+                 lora_rank: int = 16,
+                 lora_alpha: int = 32,
+                 lora_target_modules: List[str] = None):
         
         self.device = device
+        self.use_lora = use_lora
+        
+        # Apply LoRA if requested and model is local
+        if use_lora and isinstance(esm_model, ESMC):
+            print("🔧 Applying LoRA to ESMC model...")
+            esm_model = apply_lora_to_esmc(
+                esm_model, 
+                lora_rank=lora_rank,
+                lora_alpha=lora_alpha,
+                target_modules=lora_target_modules
+            )
+            print("✅ LoRA applied successfully!")
+        elif use_lora and not isinstance(esm_model, ESMC):
+            print("⚠️  LoRA training only supported with local ESMC models")
+            self.use_lora = False
+        
         self.embedding_extractor = ESMCEmbeddingExtractor(esm_model, device)
-        self.classification_net = CleavagePredictionNetwork(embedding_dim=embedding_dim)
+        self.classification_net = CleavagePredictionNetwork(
+            embedding_dim=embedding_dim
+        )
         self.classification_net.to(device)
         
         # Training history
@@ -414,7 +540,8 @@ class PolyproteinCleavagePredictor:
               batch_size: int = 8,
               learning_rate: float = 1e-3,
               weight_decay: float = 1e-5,
-              save_path: Optional[str] = None):
+              save_path: Optional[str] = None,
+              esm_learning_rate: Optional[float] = None):
         """
         Train the cleavage prediction model
         
@@ -423,9 +550,11 @@ class PolyproteinCleavagePredictor:
             val_dataset: Validation dataset (optional)
             num_epochs: Number of training epochs
             batch_size: Batch size for training
-            learning_rate: Learning rate for optimizer
+            learning_rate: Learning rate for classification head
             weight_decay: Weight decay for regularization
             save_path: Path to save the best model
+            esm_learning_rate: Learning rate for ESM LoRA parameters
+                              (if None, uses learning_rate)
         """
         
         # Prepare data
@@ -438,19 +567,73 @@ class PolyproteinCleavagePredictor:
             val_data = self.prepare_data(val_dataset)
             val_loader = self.create_dataloader(val_data, batch_size, shuffle=False)
         
-        # Setup training
-        optimizer = torch.optim.Adam(
-            self.classification_net.parameters(),
-            lr=learning_rate,
-            weight_decay=weight_decay
-        )
+        # Setup training with different learning rates for different components
+        if self.use_lora and esm_learning_rate is not None:
+            # Separate optimizers for LoRA and classification head
+            esm_params = []
+            clf_params = []
+            
+            # Get LoRA parameters from ESM model
+            for name, param in self.embedding_extractor.model.named_parameters():
+                if param.requires_grad:
+                    if 'lora_' in name:
+                        esm_params.append(param)
+                    else:
+                        # This shouldn't happen with proper LoRA setup
+                        clf_params.append(param)
+            
+            # Add classification network parameters
+            clf_params.extend(self.classification_net.parameters())
+            
+            # Create parameter groups with different learning rates
+            param_groups = []
+            if esm_params:
+                param_groups.append({
+                    'params': esm_params, 
+                    'lr': esm_learning_rate,
+                    'weight_decay': weight_decay
+                })
+                print(f"ESM LoRA parameters: {len(esm_params)} "
+                      f"(lr={esm_learning_rate})")
+            
+            param_groups.append({
+                'params': clf_params, 
+                'lr': learning_rate,
+                'weight_decay': weight_decay
+            })
+            print(f"Classification parameters: {len(clf_params)} "
+                  f"(lr={learning_rate})")
+            
+            optimizer = torch.optim.Adam(param_groups)
+        else:
+            # Standard training (classification head only or unified)
+            if self.use_lora:
+                # Include LoRA parameters with same learning rate
+                all_params = []
+                all_params.extend(self.classification_net.parameters())
+                for param in self.embedding_extractor.model.parameters():
+                    if param.requires_grad:
+                        all_params.append(param)
+                optimizer = torch.optim.Adam(
+                    all_params,
+                    lr=learning_rate,
+                    weight_decay=weight_decay
+                )
+            else:
+                # Only classification head
+                optimizer = torch.optim.Adam(
+                    self.classification_net.parameters(),
+                    lr=learning_rate,
+                    weight_decay=weight_decay
+                )
         
         # Use weighted BCE loss to handle class imbalance
         criterion = nn.BCEWithLogitsLoss(reduction='none')
         
         best_val_f1 = 0.0
         
-        print(f"Starting training for {num_epochs} epochs...")
+        mode_desc = "LoRA + Classification" if self.use_lora else "Classification Only"
+        print(f"Starting {mode_desc} training for {num_epochs} epochs...")
         
         for epoch in range(num_epochs):
             print(f"\nEpoch {epoch + 1}/{num_epochs}")
@@ -506,19 +689,70 @@ class PolyproteinCleavagePredictor:
         
         return probabilities, binary_predictions
     
-    def save_model(self, path: str):
-        """Save the trained model"""
-        torch.save({
+    def save_model(self, path: str, merge_lora: bool = False):
+        """
+        Save the trained model
+        
+        Args:
+            path: Path to save the model
+            merge_lora: Whether to merge LoRA weights before saving
+        """
+        save_dict = {
             'model_state_dict': self.classification_net.state_dict(),
             'training_history': self.training_history,
-        }, path)
+            'use_lora': self.use_lora,
+        }
+        
+        # Save LoRA weights if using LoRA
+        if self.use_lora and isinstance(self.embedding_extractor.model, ESMC):
+            if merge_lora:
+                # Merge LoRA weights and save full model
+                print("Merging LoRA weights before saving...")
+                merged_model = merge_lora_weights(self.embedding_extractor.model)
+                save_dict['esm_state_dict'] = merged_model.state_dict()
+                save_dict['lora_merged'] = True
+            else:
+                # Save only LoRA parameters
+                lora_state_dict = {}
+                for name, param in self.embedding_extractor.model.named_parameters():
+                    if 'lora_' in name:
+                        lora_state_dict[name] = param.data
+                save_dict['lora_state_dict'] = lora_state_dict
+                save_dict['lora_merged'] = False
+        
+        torch.save(save_dict, path)
         print(f"Model saved to {path}")
     
     def load_model(self, path: str):
         """Load a trained model"""
         checkpoint = torch.load(path, map_location=self.device)
+        
+        # Load classification network
         self.classification_net.load_state_dict(checkpoint['model_state_dict'])
         self.training_history = checkpoint.get('training_history', {})
+        
+        # Load LoRA weights if present
+        if checkpoint.get('use_lora', False):
+            if checkpoint.get('lora_merged', False):
+                # Load full merged model
+                if 'esm_state_dict' in checkpoint:
+                    self.embedding_extractor.model.load_state_dict(
+                        checkpoint['esm_state_dict']
+                    )
+                    print("Loaded merged LoRA model")
+            else:
+                # Load LoRA parameters
+                if 'lora_state_dict' in checkpoint:
+                    lora_state_dict = checkpoint['lora_state_dict']
+                    model_state_dict = self.embedding_extractor.model.state_dict()
+                    
+                    # Update only LoRA parameters
+                    for name, param in lora_state_dict.items():
+                        if name in model_state_dict:
+                            model_state_dict[name].copy_(param)
+                    
+                    print(f"Loaded {len(lora_state_dict)} LoRA parameters")
+        
         print(f"Model loaded from {path}")
 
 
@@ -741,18 +975,28 @@ def load_data_from_json(json_path: str, fetch_sequences: bool = False, email: st
 
 
 # Example usage and training script
-def main(model_name: str = "esmc_600m"):
+def main(model_name: str = "esmc_600m", 
+         use_lora: bool = False,
+         lora_rank: int = 16,
+         lora_alpha: int = 32):
     """Example training script using the new data format and ESMC"""
     
     # Get model configuration
     model_name, embedding_dim = get_esmc_model_config(model_name)
     
     # Initialize ESMC model
-    print(f"Loading ESMC model: {model_name} (embedding_dim={embedding_dim})...")
+    print(f"Loading ESMC model: {model_name} "
+          f"(embedding_dim={embedding_dim})...")
     model = ESMC.from_pretrained(model_name).to("cuda")
     
-    # Create predictor with correct embedding dimension
-    predictor = PolyproteinCleavagePredictor(model, embedding_dim=embedding_dim)
+    # Create predictor with LoRA support
+    predictor = PolyproteinCleavagePredictor(
+        model, 
+        embedding_dim=embedding_dim,
+        use_lora=use_lora,
+        lora_rank=lora_rank,
+        lora_alpha=lora_alpha
+    )
     
     # Load data from our new format (with sequence fetching if needed)
     print("Loading polyprotein data...")
@@ -814,14 +1058,31 @@ def main(model_name: str = "esmc_600m"):
     
     # Train model
     print("Starting training...")
-    predictor.train(
-        train_dataset=train_dataset,
-        val_dataset=val_dataset,
-        num_epochs=10,  # Increase for real training
-        batch_size=2,   # Small batch size for limited data
-        learning_rate=1e-3,
-        save_path="cleavage_model_v2.pth"
-    )
+    
+    # Set different learning rates for LoRA training
+    if use_lora:
+        # Lower learning rate for ESM LoRA parameters
+        esm_lr = 1e-4
+        clf_lr = 1e-3
+        
+        predictor.train(
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            num_epochs=20,  # Fewer epochs often needed with LoRA
+            batch_size=2,   # Small batch size for limited data
+            learning_rate=clf_lr,
+            esm_learning_rate=esm_lr,
+            save_path="cleavage_model_lora_v2.pth"
+        )
+    else:
+        predictor.train(
+            train_dataset=train_dataset,
+            val_dataset=val_dataset,
+            num_epochs=10,  # Increase for real training
+            batch_size=2,   # Small batch size for limited data
+            learning_rate=1e-3,
+            save_path="cleavage_model_v2.pth"
+        )
     
     # Make predictions on first sequence
     if data_points:
@@ -843,4 +1104,31 @@ def main(model_name: str = "esmc_600m"):
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Train polyprotein cleavage prediction")
+    parser.add_argument("--model", default="esmc_600m", 
+                       choices=["esmc_300m", "esmc_600m"],
+                       help="ESMC model to use")
+    parser.add_argument("--use-lora", action="store_true",
+                       help="Enable LoRA fine-tuning")
+    parser.add_argument("--lora-rank", type=int, default=16,
+                       help="LoRA rank (default: 16)")
+    parser.add_argument("--lora-alpha", type=int, default=32,
+                       help="LoRA alpha (default: 32)")
+    
+    args = parser.parse_args()
+    
+    print(f"🚀 Starting training with:")
+    print(f"  Model: {args.model}")
+    print(f"  LoRA: {'Enabled' if args.use_lora else 'Disabled'}")
+    if args.use_lora:
+        print(f"  LoRA Rank: {args.lora_rank}")
+        print(f"  LoRA Alpha: {args.lora_alpha}")
+    
+    main(
+        model_name=args.model,
+        use_lora=args.use_lora,
+        lora_rank=args.lora_rank,
+        lora_alpha=args.lora_alpha
+    )
