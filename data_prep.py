@@ -326,10 +326,28 @@ def collect_mat_peptides(record: Dict) -> List[Dict]:
                     start = int(first_range.get("begin", 0))
                     end = int(first_range.get("end", 0))
             
-            # Check if this looks like a mature peptide or polyprotein
-            if any(keyword in cds_name.lower() for keyword in 
-                   ['polyprotein', 'mat_peptide', 'mature', 'peptide', 'protein']):
-                
+            # EXPANDED INCLUSION CRITERIA - be more permissive
+            # Include viral proteins that could be relevant for cleavage analysis
+            include_keywords = [
+                'polyprotein', 'protein', 'peptide', 'mature',
+                'structural', 'non-structural', 'nonstructural', 
+                'orf', 'open reading frame', 'glycoprotein',
+                'capsid', 'envelope', 'replicase', 'spike',
+                'nucleocapsid', 'membrane'
+            ]
+            
+            # Also include if it's a significant protein (length > 50 aa)
+            protein_length = 0
+            if start and end:
+                protein_length = abs(end - start) // 3  # Rough amino acid length
+            
+            should_include = (
+                any(keyword in cds_name.lower() for keyword in include_keywords) or
+                any(keyword in gene_name.lower() for keyword in include_keywords) or
+                protein_length > 50  # Include larger proteins regardless of name
+            )
+            
+            if should_include:
                 out.append({
                     "nuc_accession": accession,
                     "gene_name": gene_name,
@@ -337,6 +355,7 @@ def collect_mat_peptides(record: Dict) -> List[Dict]:
                     "protein_name": protein_name,
                     "start": start,
                     "end": end,
+                    "length_aa": protein_length,
                     "organism": "Unknown",  # Not in this API response
                     "feature_type": "cds",
                     "product": cds_name,
