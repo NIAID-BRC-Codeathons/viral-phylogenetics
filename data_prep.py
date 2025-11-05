@@ -14,9 +14,21 @@ import urllib.request
 import urllib.parse
 import urllib.error
 import random
+import os
+import itertools
+from collections import defaultdict, namedtuple
 from typing import List, Dict, Tuple, Optional
 from pathlib import Path
 from dataclasses import dataclass
+
+# Optional imports for NCBI Datasets API
+try:
+    import requests
+    import pandas as pd
+    DATASETS_AVAILABLE = True
+except ImportError:
+    DATASETS_AVAILABLE = False
+    print("Warning: requests/pandas not available. NCBI Datasets API features disabled.")
 
 
 def safe_api_request(url: str, max_retries: int = 3, 
@@ -206,6 +218,293 @@ class PolyproteinEntry:
     sequence: str
     mature_peptides: List[Tuple[int, int, str]]  # (start, end, product_name)
     cleavage_sites: List[int]  # Derived from mature peptides
+
+
+# NCBI Datasets API configuration
+DATASETS_API = "https://api.ncbi.nlm.nih.gov/datasets/v2"
+DATASETS_HEADERS = {"Accept": "application/json"}
+if os.getenv("NCBI_API_KEY"):
+    DATASETS_HEADERS["X-API-Key"] = os.getenv("NCBI_API_KEY")
+
+
+def stream_annotation_report_by_taxon(taxon: str, params: Dict = None, 
+                                      backoff: float = 2.0):
+    """
+    Yields Python dicts for each report from NCBI Datasets API
+    /virus/taxon/{taxon}/annotation_report.
+    
+    Args:
+        taxon: Viral family/taxon name or ID
+        params: Additional query parameters
+        backoff: Delay on JSON decode errors
+    
+    Yields:
+        Dict records from the annotation report
+    """
+    if not DATASETS_AVAILABLE:
+        raise RuntimeError("requests/pandas required for Datasets API")
+    
+    url = f"{DATASETS_API}/virus/taxon/{taxon}/annotation_report"
+    
+    # Add pagination parameters
+    if params is None:
+        params = {}
+    
+    # Start with first page
+    page_token = None
+    
+    while True:
+        current_params = params.copy()
+        if page_token:
+            current_params['page_token'] = page_token
+        
+        try:
+            response = requests.get(url, headers=DATASETS_HEADERS, 
+                                   params=current_params, timeout=120)
+            
+            if response.status_code != 200:
+                raise RuntimeError(f"HTTP {response.status_code} for {url}: "
+                                  f"{response.text[:500]}")
+            
+            data = response.json()
+            
+            # Yield each report in the reports array
+            reports = data.get('reports', [])
+            for report in reports:
+                yield report
+            
+            # Check for next page
+            page_token = data.get('next_page_token')
+            if not page_token:
+                break
+                
+            # Be nice to the API
+            time.sleep(backoff)
+            
+        except requests.RequestException as e:
+            raise RuntimeError(f"Request failed for {url}: {e}")
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"Invalid JSON response from {url}: {e}")
+
+
+def collect_mat_peptides(record: Dict) -> List[Dict]:
+    """
+    From one NCBI Datasets API record, extract mature peptide information.
+    
+    Args:
+        record: Virus record from Datasets API
+    
+    Returns:
+        List of mature peptide feature dictionaries
+    """
+    out = []
+    
+    # Get record-level info
+    accession = record.get("accession", "Unknown")
+    genes = record.get("genes", [])
+    
+    for gene in genes:
+        gene_name = gene.get("name", "Unknown")
+        cds_list = gene.get("cds", [])
+        
+        for cds in cds_list:
+            cds_name = cds.get("name", "Unknown")
+            
+            # Get nucleotide coordinates
+            nucleotide = cds.get("nucleotide", {})
+            ranges = nucleotide.get("range", [])
+            
+            # Get protein info
+            protein = cds.get("protein", {})
+            protein_name = protein.get("name", "Unknown")
+            
+            # Extract start/end from ranges (use first range if multiple)
+            start, end = None, None
+            if ranges and isinstance(ranges, list) and len(ranges) > 0:
+                first_range = ranges[0]
+                if isinstance(first_range, dict):
+                    start = int(first_range.get("begin", 0))
+                    end = int(first_range.get("end", 0))
+            
+            # Check if this looks like a mature peptide or polyprotein
+            if any(keyword in cds_name.lower() for keyword in 
+                   ['polyprotein', 'mat_peptide', 'mature', 'peptide', 'protein']):
+                
+                out.append({
+                    "nuc_accession": accession,
+                    "gene_name": gene_name,
+                    "cds_name": cds_name,
+                    "protein_name": protein_name,
+                    "start": start,
+                    "end": end,
+                    "organism": "Unknown",  # Not in this API response
+                    "feature_type": "cds",
+                    "product": cds_name,
+                    "parent_name": (gene_name if "polyprotein" in gene_name.lower() 
+                                   else cds_name),
+                    "seq_id": accession,
+                    "strand": None,  # Not provided
+                    "protein_acc": protein.get("accession_version"),
+                    "assembly_accession": None,
+                    "tax_id": None
+                })
+    
+    return out
+
+
+def to_cleavage_junctions(mat_rows: List[Dict]) -> List[Dict]:
+    """
+    Group mat_peptides by (assembly_accession, parent_name, seq_id, strand),
+    sort by genomic coordinate, and emit junctions between consecutive peptides.
+    
+    Args:
+        mat_rows: List of mature peptide dictionaries
+    
+    Returns:
+        List of cleavage junction dictionaries
+    """
+    Junction = namedtuple("Junction",
+        "assembly_accession tax_id organism nuc_accession parent_name "
+        "left_product right_product left_end right_start junction_genomic "
+        "seq_id strand"
+    )
+    
+    cleavages = []
+    
+    # Key that approximates a polyprotein context
+    def keyfunc(d):
+        return (d["assembly_accession"], d["parent_name"], 
+                d["seq_id"], d["strand"])
+    
+    # Sort and group by polyprotein context
+    sorted_rows = sorted(
+        mat_rows, 
+        key=lambda d: (d["assembly_accession"], d["parent_name"] or "", 
+                      d["seq_id"] or "", d["start"] or 0)
+    )
+    
+    for key, group in itertools.groupby(sorted_rows, key=keyfunc):
+        group = list(group)
+        
+        # Sort by strand-aware coordinate
+        if (group[0]["strand"] or "").lower() == "minus":
+            group.sort(key=lambda d: (d["start"] or 0), reverse=True)
+        else:
+            group.sort(key=lambda d: (d["start"] or 0))
+        
+        # Create junctions between consecutive peptides
+        for a, b in zip(group, group[1:]):
+            j = a["end"] if (a["strand"] or "").lower() != "minus" else a["start"]
+            
+            cleavages.append(Junction(
+                a["assembly_accession"], a["tax_id"], a["organism"], 
+                a["nuc_accession"], a["parent_name"],
+                a["product"], b["product"],
+                a["end"], b["start"], j, a["seq_id"], a["strand"]
+            )._asdict())
+    
+    return cleavages
+
+
+def download_viral_families_datasets(
+    families: List[str] = None,
+    output_file: str = "datasets_polyproteins.json",
+    max_records_per_family: int = 100
+) -> List[Dict]:
+    """
+    Download viral polyprotein data using NCBI Datasets API
+    
+    Args:
+        families: List of viral family names
+        output_file: Output JSON file path
+        max_records_per_family: Maximum records to process per family
+    
+    Returns:
+        List of polyprotein dictionaries in standard format
+    """
+    if not DATASETS_AVAILABLE:
+        raise RuntimeError("requests and pandas required for Datasets API")
+    
+    if families is None:
+        families = ["Flaviviridae", "Picornaviridae", "Coronaviridae", 
+                   "Togaviridae", "Caliciviridae"]
+    
+    print(f"🦠 Downloading from {len(families)} viral families using "
+          f"NCBI Datasets API...")
+    
+    all_mats = []
+    
+    for family in families:
+        print(f"  Processing {family}...")
+        try:
+            record_count = 0
+            for record in stream_annotation_report_by_taxon(family):
+                mat_peptides = collect_mat_peptides(record)
+                if mat_peptides:  # Only process records with peptides
+                    all_mats.extend(mat_peptides)
+                    print(f"    Record {record_count+1}: Found {len(mat_peptides)} peptides")
+                
+                record_count += 1
+                
+                # Limit processing for testing/speed
+                if record_count >= max_records_per_family:
+                    print(f"    Reached limit of {max_records_per_family} records")
+                    break
+                    
+        except Exception as e:
+            print(f"  Error processing {family}: {e}")
+            continue
+    
+    print(f"✓ Collected {len(all_mats)} mature peptide features")
+    
+    # Build cleavage junctions per polyprotein
+    cleavages = to_cleavage_junctions(all_mats)
+    print(f"✓ Found {len(cleavages)} cleavage sites")
+    
+    # Convert to standard format (group by polyprotein)
+    polyprotein_data = defaultdict(lambda: {
+        'cleavage_sites': [],
+        'mature_peptides': [],
+        'organism': None,
+        'assembly_accession': None
+    })
+    
+    # Group cleavages by parent polyprotein
+    for cleavage in cleavages:
+        key = (cleavage['nuc_accession'], cleavage['parent_name'])
+        
+        polyprotein_data[key]['cleavage_sites'].append(
+            cleavage['junction_genomic']
+        )
+        polyprotein_data[key]['organism'] = cleavage['organism']
+        polyprotein_data[key]['assembly_accession'] = cleavage.get('assembly_accession')
+    
+    # Convert to final format
+    result_data = []
+    for (nuc_acc, parent_name), data in polyprotein_data.items():
+        if not data['cleavage_sites']:
+            continue
+            
+        result_data.append({
+            "protein_id": f"datasets_{nuc_acc}_{parent_name}",
+            "sequence": "",  # Would need additional API call for sequence
+            "cleavage_sites": sorted(set(data['cleavage_sites'])),
+            "organism": data['organism'],
+            "viral_family": "Unknown",  # Could be inferred from organism
+            "assembly_accession": data['assembly_accession'],
+            "parent_name": parent_name,
+            "nucleotide_accession": nuc_acc,
+            "source": "ncbi_datasets"
+        })
+    
+    print(f"✓ Processed {len(result_data)} polyproteins")
+    
+    # Save to file
+    with open(output_file, 'w') as f:
+        json.dump(result_data, f, indent=2)
+    
+    print(f"✅ Saved data to {output_file}")
+    return result_data
 
 
 def download_refseq_viral_polyproteins(
@@ -599,6 +898,7 @@ def download_specific_viral_families(
         print(f"  Total unique entries found: {len(family_ids)}")
         
         family_polyproteins = []
+        print(family_ids[0:10] , '...')
         for i, protein_id in enumerate(family_ids):
             try:
                 print(f"  Fetching protein {i+1}/{len(family_ids)}: "
@@ -799,6 +1099,148 @@ def validate_data_format(json_file: str):
     return True
 
 
+def download_viral_polyproteins_unified(
+    method: str = "refseq",
+    families: List[str] = None,
+    output_file: str = "unified_polyproteins.json",
+    max_per_family: int = 100,
+    email: str = "user@example.com",
+    **kwargs
+) -> List[Dict]:
+    """
+    Unified interface for downloading viral polyprotein data using either
+    RefSeq E-utilities or NCBI Datasets API.
+    
+    Args:
+        method: "refseq" or "datasets" 
+        families: List of viral family names
+        output_file: Output JSON file path
+        max_per_family: Maximum entries per family
+        email: Email for NCBI requests
+        **kwargs: Additional method-specific parameters
+    
+    Returns:
+        List of polyprotein dictionaries
+    """
+    
+    if method.lower() == "datasets":
+        if not DATASETS_AVAILABLE:
+            print("❌ Datasets API requires 'requests' and 'pandas' packages")
+            print("   Install with: pip install requests pandas")
+            return []
+        
+        print("🔬 Using NCBI Datasets API (faster, structured data)...")
+        return download_viral_families_datasets(families, output_file)
+        
+    elif method.lower() == "refseq":
+        print("🧬 Using RefSeq E-utilities (comprehensive, slower)...")
+        
+        # Use existing RefSeq download function
+        if families is None:
+            families = [
+                'Coronaviridae', 'Flaviviridae', 'Picornaviridae',
+                'Caliciviridae', 'Togaviridae'
+            ]
+        
+        delay_config = kwargs.get('delay_config', {
+            'base_delay': 2.0,
+            'search_delay': 1.0,
+            'batch_1_delay': 2.0,
+            'batch_2_delay': 3.0,
+            'batch_3_delay': 4.0,
+            'error_delay': 5.0
+        })
+        
+        download_specific_viral_families(
+            families, output_file, max_per_family, email, delay_config
+        )
+        
+        # Load and return the data
+        try:
+            with open(output_file, 'r') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            print(f"❌ Output file {output_file} not found")
+            return []
+            
+    else:
+        raise ValueError(f"Unknown method: {method}. Use 'refseq' or 'datasets'")
+
+
+def compare_download_methods(families: List[str] = None, 
+                           sample_size: int = 5) -> Dict:
+    """
+    Compare the two download methods on a small sample.
+    
+    Args:
+        families: Viral families to test
+        sample_size: Maximum entries per family for testing
+    
+    Returns:
+        Comparison statistics
+    """
+    if families is None:
+        families = ['Coronaviridae']  # Small test
+    
+    print("🔬 Comparing download methods...")
+    
+    results = {
+        'refseq': {'data': [], 'time': 0, 'error': None},
+        'datasets': {'data': [], 'time': 0, 'error': None}
+    }
+    
+    # Test RefSeq method
+    print("\n📡 Testing RefSeq E-utilities...")
+    start_time = time.time()
+    try:
+        results['refseq']['data'] = download_viral_polyproteins_unified(
+            method="refseq",
+            families=families,
+            output_file="test_refseq.json",
+            max_per_family=sample_size,
+            email="test@example.com"
+        )
+        results['refseq']['time'] = time.time() - start_time
+        print(f"✓ RefSeq: {len(results['refseq']['data'])} polyproteins "
+              f"in {results['refseq']['time']:.1f}s")
+    except Exception as e:
+        results['refseq']['error'] = str(e)
+        print(f"❌ RefSeq failed: {e}")
+    
+    # Test Datasets method  
+    print("\n🗄️  Testing NCBI Datasets API...")
+    start_time = time.time()
+    try:
+        results['datasets']['data'] = download_viral_polyproteins_unified(
+            method="datasets", 
+            families=families,
+            output_file="test_datasets.json"
+        )
+        results['datasets']['time'] = time.time() - start_time
+        print(f"✓ Datasets: {len(results['datasets']['data'])} polyproteins "
+              f"in {results['datasets']['time']:.1f}s")
+    except Exception as e:
+        results['datasets']['error'] = str(e)
+        print(f"❌ Datasets failed: {e}")
+    
+    # Summary
+    print(f"\n📊 COMPARISON SUMMARY:")
+    for method, result in results.items():
+        if result['error']:
+            print(f"   {method}: FAILED - {result['error']}")
+        else:
+            count = len(result['data'])
+            time_taken = result['time']
+            print(f"   {method}: {count} polyproteins in {time_taken:.1f}s")
+    
+    # Cleanup
+    for file in ['test_refseq.json', 'test_datasets.json']:
+        if os.path.exists(file):
+            os.remove(file)
+    
+    return results
+
+
 def main():
     """Command line interface for data preparation"""
     
@@ -831,6 +1273,20 @@ def main():
     families_parser.add_argument('--output', default='viral_family_polyproteins.json', help='Output JSON file')
     families_parser.add_argument('--max-per-family', type=int, default=100, help='Max entries per family')
     families_parser.add_argument('--email', default='user@example.com', help='Email for NCBI requests')
+    
+    # Unified downloader (NEW)
+    unified_parser = subparsers.add_parser('download', help='Unified download interface')
+    unified_parser.add_argument('--method', choices=['refseq', 'datasets'], default='refseq',
+                                help='Download method to use')
+    unified_parser.add_argument('--families', nargs='+', help='Viral family names')
+    unified_parser.add_argument('--output', default='unified_polyproteins.json', help='Output JSON file')
+    unified_parser.add_argument('--max-per-family', type=int, default=100, help='Max entries per family')
+    unified_parser.add_argument('--email', default='user@example.com', help='Email for NCBI requests')
+    
+    # Method comparison (NEW)
+    compare_parser = subparsers.add_parser('compare', help='Compare download methods')
+    compare_parser.add_argument('--families', nargs='+', help='Viral family names to test')
+    compare_parser.add_argument('--sample-size', type=int, default=5, help='Max entries per family for testing')
     
     # Data splitter
     split_parser = subparsers.add_parser('split', help='Split data into train/val/test')
@@ -868,6 +1324,16 @@ def main():
             args.max_per_family,
             args.email
         )
+    elif args.command == 'download':
+        download_viral_polyproteins_unified(
+            method=args.method,
+            families=args.families,
+            output_file=args.output,
+            max_per_family=args.max_per_family,
+            email=args.email
+        )
+    elif args.command == 'compare':
+        compare_download_methods(args.families, args.sample_size)
     elif args.command == 'split':
         if abs(args.train + args.val + args.test - 1.0) > 1e-6:
             print("Error: Train, validation, and test ratios must sum to 1.0")
