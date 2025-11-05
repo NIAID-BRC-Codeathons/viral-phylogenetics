@@ -12,9 +12,78 @@ import re
 import time
 import urllib.request
 import urllib.parse
+import urllib.error
+import random
 from typing import List, Dict, Tuple, Optional
 from pathlib import Path
 from dataclasses import dataclass
+
+
+def safe_api_request(url: str, max_retries: int = 3, 
+                     base_delay: float = 1.0) -> Optional[str]:
+    """
+    Make a safe API request with rate limiting and retry logic
+    
+    Args:
+        url: URL to request
+        max_retries: Maximum number of retry attempts
+        base_delay: Base delay between requests (seconds)
+    
+    Returns:
+        Response text or None if failed
+    """
+    for attempt in range(max_retries + 1):
+        try:
+            # Add jitter to avoid thundering herd
+            delay = base_delay + random.uniform(0, 0.5)
+            if attempt > 0:
+                # Exponential backoff for retries
+                delay *= (2 ** attempt)
+                print(f"  Retry {attempt}/{max_retries} after {delay:.1f}s...")
+            
+            time.sleep(delay)
+            
+            with urllib.request.urlopen(url, timeout=30) as response:
+                return response.read().decode()
+                
+        except urllib.error.HTTPError as e:
+            if e.code == 429:  # Too Many Requests
+                if attempt < max_retries:
+                    retry_delay = base_delay * (3 ** (attempt + 1))
+                    print(f"  Rate limited (429). Waiting {retry_delay:.1f}s before retry...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print(f"  Rate limit exceeded after {max_retries} retries")
+                    return None
+            elif e.code in [502, 503, 504]:  # Server errors
+                if attempt < max_retries:
+                    retry_delay = base_delay * (2 ** (attempt + 1))
+                    print(f"  Server error ({e.code}). Retrying in {retry_delay:.1f}s...")
+                    time.sleep(retry_delay)
+                    continue
+                else:
+                    print(f"  Server error {e.code} after {max_retries} retries")
+                    return None
+            else:
+                print(f"  HTTP error {e.code}: {e}")
+                return None
+                
+        except urllib.error.URLError as e:
+            if attempt < max_retries:
+                retry_delay = base_delay * (2 ** (attempt + 1))
+                print(f"  URL error: {e}. Retrying in {retry_delay:.1f}s...")
+                time.sleep(retry_delay)
+                continue
+            else:
+                print(f"  URL error after {max_retries} retries: {e}")
+                return None
+                
+        except Exception as e:
+            print(f"  Unexpected error: {e}")
+            return None
+    
+    return None
 
 
 def parse_fasta_with_cleavage_annotations(fasta_file: str,
@@ -254,8 +323,10 @@ def search_refseq_polyproteins(max_entries: int = 1000,
         
         try:
             url = f"{search_url}?{urllib.parse.urlencode(params)}"
-            with urllib.request.urlopen(url) as response:
-                data = json.loads(response.read().decode())
+            response_text = safe_api_request(url)
+            
+            if response_text:
+                data = json.loads(response_text)
                 
                 if 'esearchresult' in data and 'idlist' in data['esearchresult']:
                     ids = data['esearchresult']['idlist']
@@ -263,11 +334,14 @@ def search_refseq_polyproteins(max_entries: int = 1000,
                     print(f"  Found {len(ids)} entries")
                 else:
                     print("  No results found")
+            else:
+                print("  Failed to get response")
         
         except Exception as e:
             print(f"  Error in search: {e}")
         
-        time.sleep(0.5)  # Be nice to NCBI
+        # Additional delay between search terms
+        time.sleep(1.0)  # Default search delay
     
     print(f"Total unique entries found: {len(all_ids)}")
     return list(all_ids)[:max_entries]
@@ -300,10 +374,13 @@ def fetch_polyprotein_details(protein_id: str,
     
     try:
         url = f"{fetch_url}?{urllib.parse.urlencode(params)}"
-        with urllib.request.urlopen(url) as response:
-            genbank_text = response.read().decode()
+        genbank_text = safe_api_request(url, max_retries=5, base_delay=1.5)
         
-        return parse_genbank_polyprotein_text(genbank_text)
+        if genbank_text:
+            return parse_genbank_polyprotein_text(genbank_text)
+        else:
+            print(f"Failed to fetch data for {protein_id}")
+            return None
     
     except Exception as e:
         print(f"Error fetching {protein_id}: {e}")
@@ -456,7 +533,8 @@ def download_specific_viral_families(
     viral_families: List[str] = None,
     output_file: str = "viral_family_polyproteins.json",
     max_per_family: int = 100,
-    email: str = "user@example.com"
+    email: str = "user@example.com",
+    delay_config: Dict[str, float] = None
 ) -> None:
     """
     Download polyproteins from specific viral families
@@ -466,7 +544,19 @@ def download_specific_viral_families(
         output_file: Output file path
         max_per_family: Maximum entries per family
         email: Email for NCBI requests
+        delay_config: Custom delay configuration for rate limiting
     """
+    
+    # Default delay configuration for NCBI rate limiting
+    if delay_config is None:
+        delay_config = {
+            'base_delay': 2.0,      # Base delay between requests
+            'search_delay': 1.0,    # Delay between search terms
+            'batch_1_delay': 2.0,   # First 10 proteins
+            'batch_2_delay': 3.0,   # Next 10 proteins  
+            'batch_3_delay': 4.0,   # Remaining proteins
+            'error_delay': 5.0      # Delay after errors
+        }
     
     if viral_families is None:
         viral_families = [
@@ -509,14 +599,29 @@ def download_specific_viral_families(
         print(f"  Total unique entries found: {len(family_ids)}")
         
         family_polyproteins = []
-        for protein_id in family_ids:
+        for i, protein_id in enumerate(family_ids):
             try:
+                print(f"  Fetching protein {i+1}/{len(family_ids)}: "
+                      f"{protein_id}")
                 entry = fetch_polyprotein_details(protein_id, email)
                 if entry and len(entry.cleavage_sites) > 0:
                     family_polyproteins.append(entry)
-                time.sleep(0.3)  # Rate limiting
+                    print(f"    ✓ Found {len(entry.cleavage_sites)} "
+                          f"cleavage sites")
+                else:
+                    print("    ✗ No cleavage sites found")
+                
+                # Progressive delay using configuration
+                if i < 10:
+                    time.sleep(delay_config['batch_1_delay'])
+                elif i < 20:
+                    time.sleep(delay_config['batch_2_delay'])
+                else:
+                    time.sleep(delay_config['batch_3_delay'])
+                    
             except Exception as e:
                 print(f"Error processing {protein_id}: {e}")
+                time.sleep(delay_config['error_delay'])
         
         count = len(family_polyproteins)
         print(f"Downloaded {count} polyproteins from {family}")
@@ -566,11 +671,15 @@ def search_refseq_polyproteins_by_term(search_term: str,
     
     try:
         url = f"{search_url}?{urllib.parse.urlencode(params)}"
-        with urllib.request.urlopen(url) as response:
-            data = json.loads(response.read().decode())
+        response_text = safe_api_request(url, max_retries=3, base_delay=1.0)
+        
+        if response_text:
+            data = json.loads(response_text)
             
             if 'esearchresult' in data and 'idlist' in data['esearchresult']:
                 return data['esearchresult']['idlist']
+        else:
+            print(f"Failed to get response for search: {search_term}")
     except Exception as e:
         print(f"Search error: {e}")
     
