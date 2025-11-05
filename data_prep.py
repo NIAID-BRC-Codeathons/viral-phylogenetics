@@ -143,7 +143,7 @@ def download_refseq_viral_polyproteins(
     output_file: str = "refseq_polyproteins.json",
     max_entries: int = 1000,
     delay: float = 0.5,
-    email: str = "user@example.com"
+    email: str = "dmoi@unil.ch"
 ) -> List[PolyproteinEntry]:
     """
     Download viral polyprotein data from RefSeq with cleavage annotations
@@ -211,7 +211,7 @@ def download_refseq_viral_polyproteins(
 
 
 def search_refseq_polyproteins(max_entries: int = 1000,
-                               email: str = "user@example.com") -> List[str]:
+                               email: str = "dmoi@unil.ch") -> List[str]:
     """
     Search RefSeq for viral polyprotein sequences
     
@@ -222,11 +222,18 @@ def search_refseq_polyproteins(max_entries: int = 1000,
     base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
     
     # Search terms for viral polyproteins
+    polyprotein_genes = ("( polyprotein[Protein Name] OR ORF1a[Gene] OR "
+                         "ORF1ab[Gene] OR pp1a[Gene] OR pp1ab[Gene] )")
+    
     search_terms = [
         "polyprotein[Title] AND virus[Organism]",
         "polyprotein[Title] AND viral[Organism]",
         "(polyprotein OR poly-protein)[Title] AND (virus OR viral)[All Fields]",
-        "mature_protein[Feature] AND polyprotein[Title]"
+        f"{polyprotein_genes} AND virus[Organism]",
+        f"{polyprotein_genes} AND viral[Organism]",
+        "mature_protein[Feature] AND polyprotein[Title]",
+        ("( replicase[Protein Name] OR nonstructural[Protein Name] ) AND "
+         "polyprotein[Title] AND virus[Organism]")
     ]
     
     all_ids = set()
@@ -477,10 +484,29 @@ def download_specific_viral_families(
     for family in viral_families:
         print(f"\nProcessing {family}...")
         
-        # Search for polyproteins in this family
-        search_term = f"polyprotein[Title] AND {family}[Organism]"
-        family_ids = search_refseq_polyproteins_by_term(search_term,
-                                                        max_per_family, email)
+        # Try multiple search strategies to maximize results
+        search_strategies = [
+            f"polyprotein[Title] AND {family}[Organism]",
+            f"ORF1ab[Gene] AND {family}[Organism]",
+            f"ORF1a[Gene] AND {family}[Organism]",
+            f"polyprotein[Protein Name] AND {family}[Organism]",
+            f"replicase[Protein Name] AND {family}[Organism]"
+        ]
+        
+        all_family_ids = set()
+        for strategy in search_strategies:
+            try:
+                max_per_strategy = max_per_family // len(search_strategies) + 1
+                ids = search_refseq_polyproteins_by_term(
+                    strategy, max_per_strategy, email)
+                all_family_ids.update(ids)
+                if len(ids) > 0:
+                    print(f"  Strategy '{strategy}' found {len(ids)} entries")
+            except Exception as e:
+                print(f"  Strategy '{strategy}' failed: {e}")
+        
+        family_ids = list(all_family_ids)[:max_per_family]
+        print(f"  Total unique entries found: {len(family_ids)}")
         
         family_polyproteins = []
         for protein_id in family_ids:
@@ -492,7 +518,8 @@ def download_specific_viral_families(
             except Exception as e:
                 print(f"Error processing {protein_id}: {e}")
         
-        print(f"Downloaded {len(family_polyproteins)} polyproteins from {family}")
+        count = len(family_polyproteins)
+        print(f"Downloaded {count} polyproteins from {family}")
         
         # Convert to standard format
         for entry in family_polyproteins:

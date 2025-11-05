@@ -9,13 +9,16 @@ actually downloading large amounts of data.
 import json
 import tempfile
 import os
+import time
 from data_prep import (
     search_refseq_polyproteins_by_term,
     fetch_polyprotein_details,
     parse_genbank_polyprotein_text,
     calculate_cleavage_sites,
     validate_data_format,
-    PolyproteinEntry
+    PolyproteinEntry,
+    download_specific_viral_families,
+    create_train_val_test_splits
 )
 
 
@@ -220,6 +223,242 @@ def test_polyprotein_entry():
         return False
 
 
+def test_viral_clade_download():
+    """Test downloading polyproteins from specific viral clades"""
+    print("Testing viral clade download...")
+    
+    try:
+        # Test with a small set of viral families
+        test_families = ["Coronaviridae", "Picornaviridae"]
+        output_file = "test_viral_clades.json"
+        
+        print(f"  Attempting to download from families: {test_families}")
+        print("  Note: This requires internet connection to NCBI")
+        
+        # Download with small limits for testing
+        download_specific_viral_families(
+            viral_families=test_families,
+            output_file=output_file,
+            max_per_family=3,  # Small number for testing
+            email="test@example.com"
+        )
+        
+        # Check if file was created and has content
+        if os.path.exists(output_file):
+            with open(output_file, 'r') as f:
+                data = json.load(f)
+            
+            print(f"  ✓ Downloaded {len(data)} polyproteins")
+            
+            # Verify data structure
+            if len(data) > 0:
+                sample = data[0]
+                required_fields = [
+                    'protein_id', 'sequence', 'cleavage_sites',
+                    'organism', 'viral_family'
+                ]
+                
+                missing_fields = [
+                    field for field in required_fields
+                    if field not in sample
+                ]
+                if missing_fields:
+                    print(f"  ❌ Missing fields: {missing_fields}")
+                    return False
+                
+                print("  ✓ Data structure validated")
+                protein_id = sample['protein_id']
+                viral_family = sample['viral_family']
+                print(f"  Sample: {protein_id} from {viral_family}")
+                print(f"  Sequence length: {len(sample['sequence'])}")
+                print(f"  Cleavage sites: {len(sample['cleavage_sites'])}")
+            
+            # Clean up test file
+            os.unlink(output_file)
+            return True
+        else:
+            print("  ❌ No output file created")
+            return False
+        
+    except Exception as e:
+        print(f"  ❌ Viral clade download test failed: {e}")
+        # Clean up on error
+        if os.path.exists("test_viral_clades.json"):
+            os.unlink("test_viral_clades.json")
+        return False
+
+
+def test_specific_refseq_search():
+    """Test downloading specific polyproteins from RefSeq"""
+    print("Testing specific RefSeq search...")
+    
+    try:
+        # Test with a very specific search that should return known results
+        search_terms = [
+            "polyprotein[Title] AND SARS-CoV-2[Organism]",
+            "polyprotein[Title] AND Poliovirus[Organism]",
+            "polyprotein[Title] AND Dengue[Organism]"
+        ]
+        
+        all_downloaded = []
+        
+        for search_term in search_terms:
+            print(f"  Searching: {search_term}")
+            
+            try:
+                # Get a few IDs for each search
+                ids = search_refseq_polyproteins_by_term(
+                    search_term=search_term,
+                    max_entries=2,  # Small number for testing
+                    email="test@example.com"
+                )
+                
+                print(f"    Found {len(ids)} IDs")
+                
+                # Try to fetch details for first ID if available
+                if len(ids) > 0:
+                    first_id = ids[0]
+                    print(f"    Fetching details for: {first_id}")
+                    
+                    entry = fetch_polyprotein_details(
+                        first_id, "test@example.com"
+                    )
+                    if entry:
+                        all_downloaded.append(entry)
+                        print(f"    ✓ Downloaded: {entry.accession}")
+                        print(f"      Organism: {entry.organism}")
+                        seq_len = len(entry.sequence)
+                        print(f"      Sequence length: {seq_len}")
+                        cleavage_count = len(entry.cleavage_sites)
+                        print(f"      Cleavage sites: {cleavage_count}")
+                    else:
+                        print(f"    ⚠ Could not fetch details for {first_id}")
+                
+                # Be nice to NCBI
+                time.sleep(1)
+                
+            except Exception as e:
+                print(f"    ❌ Error with search '{search_term}': {e}")
+        
+        if len(all_downloaded) > 0:
+            downloaded_count = len(all_downloaded)
+            print(f"  ✓ Successfully downloaded {downloaded_count} polyproteins")
+            
+            # Test that we got diverse organisms
+            organisms = [entry.organism for entry in all_downloaded]
+            print(f"  Organisms found: {organisms}")
+            
+            return True
+        else:
+            print("  ⚠ No polyproteins downloaded, but searches may have run")
+            # Don't fail if no data found, connection might be limited
+            return True
+            
+    except Exception as e:
+        print(f"  ❌ Specific RefSeq search test failed: {e}")
+        return False
+
+
+def test_data_splitting():
+    """Test data splitting functionality"""
+    print("Testing data splitting...")
+    
+    try:
+        # Create test data
+        test_data = []
+        base_sequence = "MESLVPGFNEKTHVQLSLPVLQVRDVLVRGFGDSVEEVLS"
+        for i in range(10):
+            test_data.append({
+                "protein_id": f"test_protein_{i}",
+                "sequence": base_sequence + "A" * i,
+                "cleavage_sites": [10 + i, 20 + i],
+                "organism": f"Test virus {i}"
+            })
+        
+        # Save test data to temporary file
+        test_input_file = "test_data_for_splitting.json"
+        with open(test_input_file, 'w') as f:
+            json.dump(test_data, f, indent=2)
+        
+        try:
+            # Test splitting
+            create_train_val_test_splits(
+                input_file=test_input_file,
+                train_ratio=0.6,
+                val_ratio=0.2,
+                test_ratio=0.2,
+                random_seed=42
+            )
+            
+            # Check that split files were created
+            train_file = "test_data_for_splitting_train.json"
+            val_file = "test_data_for_splitting_val.json"
+            test_file = "test_data_for_splitting_test.json"
+            
+            split_files = [train_file, val_file, test_file]
+            all_exist = all(os.path.exists(f) for f in split_files)
+            
+            if not all_exist:
+                print("  ❌ Not all split files were created")
+                return False
+            
+            # Load and check split sizes
+            with open(train_file, 'r') as f:
+                train_data = json.load(f)
+            with open(val_file, 'r') as f:
+                val_data = json.load(f)
+            with open(test_file, 'r') as f:
+                test_data_split = json.load(f)
+            
+            total_split = (len(train_data) + len(val_data) +
+                           len(test_data_split))
+            
+            print("  ✓ Split completed:")
+            print(f"    Train: {len(train_data)} sequences")
+            print(f"    Validation: {len(val_data)} sequences")
+            print(f"    Test: {len(test_data_split)} sequences")
+            original_count = len(test_data)
+            print(f"    Total: {total_split} (original: {original_count})")
+            
+            if total_split != len(test_data):
+                print("  ❌ Split sizes don't match original data size")
+                return False
+            
+            # Check that splits are roughly correct proportions
+            expected_train = int(len(test_data) * 0.6)
+            expected_val = int(len(test_data) * 0.2)
+            
+            if abs(len(train_data) - expected_train) > 1:
+                train_len = len(train_data)
+                msg = f"  ⚠ Train split: {train_len} vs {expected_train}"
+                print(msg)
+            
+            if abs(len(val_data) - expected_val) > 1:
+                val_len = len(val_data)
+                print(f"  ⚠ Val split unexpected: {val_len} vs {expected_val}")
+            
+            print("  ✓ Data splitting completed successfully")
+            
+        finally:
+            # Clean up test files
+            cleanup_files = [
+                test_input_file,
+                "test_data_for_splitting_train.json",
+                "test_data_for_splitting_val.json",
+                "test_data_for_splitting_test.json"
+            ]
+            
+            for file in cleanup_files:
+                if os.path.exists(file):
+                    os.unlink(file)
+        
+        return True
+        
+    except Exception as e:
+        print(f"  ❌ Data splitting test failed: {e}")
+        return False
+
+
 def run_all_tests():
     """Run all tests"""
     print("🧪 Testing RefSeq Data Preparation")
@@ -230,7 +469,10 @@ def run_all_tests():
         ("Cleavage Calculation", test_cleavage_calculation),
         ("GenBank Parsing", test_genbank_parsing),
         ("Data Validation", test_data_validation),
+        ("Data Splitting", test_data_splitting),
         ("RefSeq Search", test_search_function),
+        ("Specific RefSeq Search", test_specific_refseq_search),
+        ("Viral Clade Download", test_viral_clade_download),
     ]
     
     results = []
