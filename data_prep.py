@@ -492,9 +492,18 @@ def download_viral_families_datasets(
     for cleavage in cleavages:
         key = (cleavage['nuc_accession'], cleavage['parent_name'])
         
-        polyprotein_data[key]['cleavage_sites'].append(
-            cleavage['junction_genomic']
-        )
+        # Store full cleavage site information, not just coordinates
+        cleavage_site = {
+            'start': cleavage['left_end'],
+            'end': cleavage['right_start'],
+            'junction_position': cleavage['junction_genomic'],
+            'left_product': cleavage['left_product'],
+            'right_product': cleavage['right_product'],
+            'seq_id': cleavage['seq_id'],
+            'strand': cleavage['strand']
+        }
+        
+        polyprotein_data[key]['cleavage_sites'].append(cleavage_site)
         polyprotein_data[key]['organism'] = cleavage['organism']
         polyprotein_data[key]['assembly_accession'] = cleavage.get('assembly_accession')
     
@@ -504,10 +513,16 @@ def download_viral_families_datasets(
         if not data['cleavage_sites']:
             continue
             
+        # Sort cleavage sites by junction position
+        sorted_cleavage_sites = sorted(
+            data['cleavage_sites'], 
+            key=lambda x: x['junction_position']
+        )
+            
         result_data.append({
             "protein_id": f"datasets_{nuc_acc}_{parent_name}",
             "sequence": "",  # Would need additional API call for sequence
-            "cleavage_sites": sorted(set(data['cleavage_sites'])),
+            "cleavage_sites": sorted_cleavage_sites,
             "organism": data['organism'],
             "viral_family": "Unknown",  # Could be inferred from organism
             "assembly_accession": data['assembly_accession'],

@@ -1,10 +1,10 @@
 """
-Polyprotein Cleavage Site Prediction using ESM3 Embeddings
+Polyprotein Cleavage Site Prediction using ESMC Embeddings
 
 This module implements a binary classification approach for predicting viral
 polyprotein cleavage sites. The approach has two main components:
 
-1. ESM3 Embedding Generation: Extract per-residue embeddings from ESM3 for
+1. ESMC Embedding Generation: Extract per-residue embeddings from ESMC for
    the entire polyprotein
 2. Binary Classification: Feed embeddings to a small feedforward network to
    predict cut/no-cut
@@ -19,12 +19,14 @@ from torch.utils.data import Dataset
 from typing import List, Tuple, Optional, Dict, Union
 import numpy as np
 import json
+import requests
+import time
 from dataclasses import dataclass
 from tqdm import tqdm
 
 # ESM imports
-from esm.models.esm3 import ESM3
-from esm.sdk.api import ESMProtein, LogitsConfig, ESM3InferenceClient
+from esm.models.esmc import ESMC
+from esm.sdk.api import ESMProtein, LogitsConfig, ESMCInferenceClient
 
 
 @dataclass
@@ -66,11 +68,11 @@ class PolyproteinDataset(Dataset):
 class CleavagePredictionNetwork(nn.Module):
     """
     Small feedforward network for binary cleavage site prediction.
-    Takes ESM3 embeddings as input and outputs binary predictions.
+    Takes ESMC embeddings as input and outputs binary predictions.
     """
     
     def __init__(self,
-                 embedding_dim: int = 1536,  # ESM3-small embedding dimension
+                 embedding_dim: int = 1152,  # ESMC-600M embedding dimension (default)
                  hidden_dims: List[int] = [512, 256, 128],
                  dropout_rate: float = 0.1):
         super().__init__()
@@ -135,17 +137,17 @@ class CleavagePredictionNetwork(nn.Module):
         return torch.sigmoid(logits)
 
 
-class ESM3EmbeddingExtractor:
-    """Utility class for extracting embeddings from ESM3"""
+class ESMCEmbeddingExtractor:
+    """Utility class for extracting embeddings from ESMC"""
     
     def __init__(self,
-                 model: Union[ESM3, ESM3InferenceClient],
+                 model: Union[ESMC, ESMCInferenceClient],
                  device: str = "cuda"):
         self.model = model
         self.device = device
         
         # Move model to device if it's a local model
-        if isinstance(model, ESM3):
+        if isinstance(model, ESMC):
             self.model = self.model.to(device)
             self.model.eval()
     
@@ -166,7 +168,7 @@ class ESM3EmbeddingExtractor:
         config = LogitsConfig(return_embeddings=True)
         
         with torch.no_grad():
-            if isinstance(self.model, ESM3):
+            if isinstance(self.model, ESMC):
                 # Local model
                 encoded = self.model.encode(protein)
                 output = self.model.logits(encoded, config)
@@ -206,12 +208,12 @@ class PolyproteinCleavagePredictor:
     """
     
     def __init__(self,
-                 esm_model: Union[ESM3, ESM3InferenceClient],
+                 esm_model: Union[ESMC, ESMCInferenceClient],
                  device: str = "cuda",
-                 embedding_dim: int = 1536):
+                 embedding_dim: int = 1152):  # ESMC-600M default
         
         self.device = device
-        self.embedding_extractor = ESM3EmbeddingExtractor(esm_model, device)
+        self.embedding_extractor = ESMCEmbeddingExtractor(esm_model, device)
         self.classification_net = CleavagePredictionNetwork(embedding_dim=embedding_dim)
         self.classification_net.to(device)
         
@@ -520,17 +522,139 @@ class PolyproteinCleavagePredictor:
         print(f"Model loaded from {path}")
 
 
-def load_data_from_json(json_path: str) -> List[CleavageDataPoint]:
+def fetch_protein_sequence(accession: str, email: str = "dmoi@unil.ch") -> Optional[str]:
+    """
+    Fetch protein sequence from NCBI using accession number
+    
+    Args:
+        accession: Protein accession number
+        email: Email for NCBI requests
+        
+    Returns:
+        Protein sequence string or None if failed
+    """
+    try:
+        # Use NCBI E-utilities to fetch sequence
+        base_url = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
+        
+        # First, get the GI number from accession
+        search_url = f"{base_url}esearch.fcgi"
+        search_params = {
+            'db': 'protein',
+            'term': accession,
+            'retmode': 'json',
+            'email': email
+        }
+        
+        response = requests.get(search_url, params=search_params)
+        response.raise_for_status()
+        search_data = response.json()
+        
+        if not search_data.get('esearchresult', {}).get('idlist'):
+            print(f"No results found for accession {accession}")
+            return None
+        
+        # Get the first ID
+        protein_id = search_data['esearchresult']['idlist'][0]
+        
+        # Fetch the sequence using efetch
+        fetch_url = f"{base_url}efetch.fcgi"
+        fetch_params = {
+            'db': 'protein',
+            'id': protein_id,
+            'rettype': 'fasta',
+            'retmode': 'text',
+            'email': email
+        }
+        
+        response = requests.get(fetch_url, params=fetch_params)
+        response.raise_for_status()
+        
+        # Parse FASTA format
+        fasta_content = response.text.strip()
+        lines = fasta_content.split('\n')
+        
+        if lines and lines[0].startswith('>'):
+            # Join all sequence lines (skip header)
+            sequence = ''.join(lines[1:])
+            return sequence.replace(' ', '').replace('\n', '').upper()
+        
+        return None
+        
+    except Exception as e:
+        print(f"Error fetching sequence for {accession}: {e}")
+        return None
+
+
+def safe_api_request(func, *args, **kwargs):
+    """Make API request with rate limiting and retry logic"""
+    max_retries = 3
+    base_delay = 2
+    
+    for attempt in range(max_retries):
+        try:
+            result = func(*args, **kwargs)
+            time.sleep(base_delay)  # Be respectful to NCBI
+            return result
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:  # Too Many Requests
+                delay = base_delay * (2 ** attempt)
+                print(f"Rate limited, waiting {delay} seconds before retry {attempt + 1}/{max_retries}")
+                time.sleep(delay)
+                continue
+            else:
+                raise
+        except Exception as e:
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(base_delay)
+    
+    return None
+
+
+def get_esmc_model_config(model_name: str = "esmc_600m") -> tuple[str, int]:
+    """
+    Get ESMC model configuration including embedding dimension
+    
+    Args:
+        model_name: ESMC model name ("esmc_300m" or "esmc_600m")
+        
+    Returns:
+        Tuple of (model_name, embedding_dimension)
+    """
+    if model_name == "esmc_300m":
+        return "esmc_300m", 960
+    elif model_name == "esmc_600m":
+        return "esmc_600m", 1152
+    else:
+        raise ValueError(f"Unknown ESMC model: {model_name}. "
+                        f"Supported models: esmc_300m, esmc_600m")
+
+
+def load_data_from_json(json_path: str, fetch_sequences: bool = False, email: str = "dmoi@unil.ch") -> List[CleavageDataPoint]:
     """
     Load polyprotein data from JSON file
+    
+    Supports both old and new formats:
+    Old format: cleavage_sites as list of integers
+    New format: cleavage_sites as list of dictionaries with 'junction_position'
+    
+    Args:
+        json_path: Path to JSON data file
+        fetch_sequences: Whether to fetch missing sequences from NCBI
+        email: Email for NCBI requests (required if fetch_sequences=True)
     
     Expected format:
     [
         {
             "protein_id": "protein_1",
-            "sequence": "MAKL...",
-            "cleavage_sites": [10, 25, 67],
-            "organism": "SARS-CoV-2"
+            "sequence": "MAKL...",  # May be empty if not fetched
+            "cleavage_sites": [
+                {"junction_position": 10, "start": 10, "end": 20, ...},
+                # OR [10, 25, 67]  # Old format
+            ],
+            "organism": "SARS-CoV-2",
+            "nucleotide_accession": "NC_045512.2"  # For sequence fetching
         },
         ...
     ]
@@ -539,56 +663,183 @@ def load_data_from_json(json_path: str) -> List[CleavageDataPoint]:
         data = json.load(f)
     
     data_points = []
-    for item in data:
-        data_point = CleavageDataPoint(
-            protein_id=item['protein_id'],
-            sequence=item['sequence'],
-            cleavage_sites=item['cleavage_sites'],
-            organism=item.get('organism', None)
-        )
-        data_points.append(data_point)
+    skipped_count = 0
     
+    for item in tqdm(data, desc="Processing polyproteins"):
+        sequence = item.get('sequence', '')
+        
+        # Try to fetch sequence if missing and requested
+        if (not sequence or len(sequence) == 0) and fetch_sequences:
+            # Try to extract accession from protein_id or use nucleotide_accession
+            accession = None
+            
+            # Look for accession in various fields
+            if 'nucleotide_accession' in item and item['nucleotide_accession']:
+                accession = item['nucleotide_accession']
+            elif 'protein_id' in item:
+                # Try to extract accession from protein_id like "datasets_Y14131.1_coat protein"
+                protein_id = item['protein_id']
+                if '_' in protein_id:
+                    parts = protein_id.split('_')
+                    if len(parts) >= 2:
+                        accession = parts[1]  # Get the Y14131.1 part
+            
+            if accession:
+                print(f"Fetching sequence for {accession}...")
+                sequence = safe_api_request(fetch_protein_sequence, accession, email)
+                if sequence:
+                    print(f"✅ Retrieved {len(sequence)} amino acids for {accession}")
+                    # Update the item with fetched sequence
+                    item['sequence'] = sequence
+                else:
+                    print(f"❌ Could not fetch sequence for {accession}")
+        
+        # Skip entries without sequences
+        if not sequence or len(sequence) == 0:
+            skipped_count += 1
+            print(f"⚠️  Skipping {item['protein_id']}: No sequence available")
+            continue
+        
+        # Parse cleavage sites - handle both old and new formats
+        cleavage_sites_raw = item.get('cleavage_sites', [])
+        cleavage_positions = []
+        
+        for site in cleavage_sites_raw:
+            if isinstance(site, dict):
+                # New format: extract junction_position
+                junction_pos = site.get('junction_position')
+                if junction_pos is not None:
+                    # Convert to 0-based indexing if needed and validate
+                    if 0 <= junction_pos < len(sequence):
+                        cleavage_positions.append(junction_pos)
+                    else:
+                        print(f"⚠️  Invalid cleavage position {junction_pos} "
+                              f"for sequence length {len(sequence)} in {item['protein_id']}")
+            elif isinstance(site, int):
+                # Old format: direct integer position
+                if 0 <= site < len(sequence):
+                    cleavage_positions.append(site)
+                else:
+                    print(f"⚠️  Invalid cleavage position {site} "
+                          f"for sequence length {len(sequence)} in {item['protein_id']}")
+        
+        if cleavage_positions:  # Only include if we have valid cleavage sites
+            data_point = CleavageDataPoint(
+                protein_id=item['protein_id'],
+                sequence=sequence,
+                cleavage_sites=cleavage_positions,
+                organism=item.get('organism', None)
+            )
+            data_points.append(data_point)
+        else:
+            skipped_count += 1
+            print(f"⚠️  Skipping {item['protein_id']}: No valid cleavage sites")
+    
+    print(f"✅ Loaded {len(data_points)} polyproteins, "
+          f"skipped {skipped_count} entries")
     return data_points
 
 
 # Example usage and training script
-def main():
-    """Example training script"""
+def main(model_name: str = "esmc_600m"):
+    """Example training script using the new data format and ESMC"""
     
-    # Initialize ESM3 model
-    print("Loading ESM3 model...")
-    model = ESM3.from_pretrained("esm3_sm_open_v1").to("cuda")
+    # Get model configuration
+    model_name, embedding_dim = get_esmc_model_config(model_name)
     
-    # Create predictor
-    predictor = PolyproteinCleavagePredictor(model)
+    # Initialize ESMC model
+    print(f"Loading ESMC model: {model_name} (embedding_dim={embedding_dim})...")
+    model = ESMC.from_pretrained(model_name).to("cuda")
     
-    # Example data (replace with your actual data loading)
-    example_data = [
-        CleavageDataPoint(
-            protein_id="example_1",
-            sequence="MKQHKAMIVALIVICITAVVAALVTRKDLCEVAKLR",
-            cleavage_sites=[15, 25],  # Example cleavage positions
-            organism="Example virus"
+    # Create predictor with correct embedding dimension
+    predictor = PolyproteinCleavagePredictor(model, embedding_dim=embedding_dim)
+    
+    # Load data from our new format (with sequence fetching if needed)
+    print("Loading polyprotein data...")
+    
+    # Example: Load data with sequence fetching enabled
+    # Replace with actual path to your data file
+    data_file = "extended_closteroviridae.json"
+    
+    try:
+        # Try loading with sequence fetching
+        data_points = load_data_from_json(
+            data_file, 
+            fetch_sequences=True,  # Enable sequence fetching
+            email="dmoi@unil.ch"   # Required for NCBI API
         )
-    ]
+        
+        if not data_points:
+            print("No valid data points found. Creating example data...")
+            # Fallback to example data
+            data_points = [
+                CleavageDataPoint(
+                    protein_id="example_1",
+                    sequence="MKQHKAMIVALIVICITAVVAALVTRKDLCEVAKLR",
+                    cleavage_sites=[15, 25],  # Example cleavage positions
+                    organism="Example virus"
+                )
+            ]
     
-    # Create datasets
-    train_dataset = PolyproteinDataset(example_data)
+    except FileNotFoundError:
+        print(f"Data file {data_file} not found. Using example data...")
+        # Example data for demonstration
+        data_points = [
+            CleavageDataPoint(
+                protein_id="example_1",
+                sequence="MKQHKAMIVALIVICITAVVAALVTRKDLCEVAKLR",
+                cleavage_sites=[15, 25],  # Example cleavage positions
+                organism="Example virus"
+            )
+        ]
+    
+    print(f"Loaded {len(data_points)} polyproteins for training")
+    
+    # Create datasets (split for train/validation if you have enough data)
+    if len(data_points) > 1:
+        # Simple train/val split
+        split_idx = int(0.8 * len(data_points))
+        train_data = data_points[:split_idx]
+        val_data = data_points[split_idx:]
+        
+        train_dataset = PolyproteinDataset(train_data)
+        val_dataset = PolyproteinDataset(val_data)
+        
+        print(f"Training on {len(train_data)} polyproteins, "
+              f"validating on {len(val_data)} polyproteins")
+    else:
+        train_dataset = PolyproteinDataset(data_points)
+        val_dataset = None
+        print(f"Training on {len(data_points)} polyproteins (no validation)")
     
     # Train model
+    print("Starting training...")
     predictor.train(
         train_dataset=train_dataset,
-        num_epochs=5,  # Use more epochs for real training
-        batch_size=2,
-        save_path="cleavage_model.pth"
+        val_dataset=val_dataset,
+        num_epochs=10,  # Increase for real training
+        batch_size=2,   # Small batch size for limited data
+        learning_rate=1e-3,
+        save_path="cleavage_model_v2.pth"
     )
     
-    # Make predictions
-    test_sequence = "MKQHKAMIVALIVICITAVVAALVTRKDLCEVAKLR"
-    probabilities, predictions = predictor.predict(test_sequence)
-    
-    print(f"Cleavage probabilities: {probabilities}")
-    print(f"Binary predictions: {predictions}")
+    # Make predictions on first sequence
+    if data_points:
+        test_sequence = data_points[0].sequence
+        print(f"\nMaking predictions on test sequence: {test_sequence[:50]}...")
+        
+        probabilities, predictions = predictor.predict(test_sequence)
+        
+        print(f"Sequence length: {len(test_sequence)}")
+        print(f"Cleavage probabilities (showing positions > 0.1):")
+        
+        high_prob_positions = [(i, prob) for i, prob in enumerate(probabilities) if prob > 0.1]
+        for pos, prob in high_prob_positions:
+            print(f"  Position {pos}: {prob:.3f}")
+        
+        # Show actual cleavage sites
+        actual_sites = data_points[0].cleavage_sites
+        print(f"Actual cleavage sites: {actual_sites}")
 
 
 if __name__ == "__main__":
