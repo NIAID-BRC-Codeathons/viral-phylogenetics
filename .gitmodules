@@ -4,3 +4,6 @@
 [submodule "esm"]
 	path = esm
 	url = git@github.com:evolutionaryscale/esm.git
+[submodule "unicore"]
+	path = unicore
+	url = git@github.com:steineggerlab/unicore.git
