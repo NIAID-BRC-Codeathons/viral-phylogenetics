@@ -1,0 +1,128 @@
+#!/bin/bash
+
+# subdb - mmseqs/foldseek createsubdb extension
+# usage: subdb <i:program> <i:subset> <i:DB> <o:DB> [options]
+
+set -eu
+
+# usage
+function usage {
+	echo "subdb - mmseqs/foldseek createsubdb extension"
+	echo
+	echo "usage: subdb <i:program> <i:subsetFile> <i:DB> <o:DB> [options]"
+	echo
+	echo "required:"
+	echo " <i:program>  mmseqs / foldseek"
+	echo " <i:subset>   subset file with keys / FASTA identifiers"
+	echo " <i:DB>       mmseqs/foldseek DB"
+	echo " <o:DB>       output subset DB"
+	echo
+	echo "options:"
+	echo " -s INT       Subdb mode 0: copy data 1: soft link data and write index [0]"
+	echo " -i INT       Select DB entries based on 0: database keys, 1: FASTA identifiers (.lookup) [1]"
+	echo " -v INT       Verbosity level: 0: quiet, 1: +errors, 2: +warnings, 3: +info [3]"
+	echo " -m STR       mmseqs binary path [mmseqs]"
+	echo " -f STR       foldseek binary path [foldseek]"
+	echo
+	exit 0
+}
+
+# args
+VQ=0
+H=0
+for var in "$@"
+do
+	if [[ "$var" =~ ^-.* ]]
+	then VQ=$((VQ - 1))
+	else VQ=$((VQ + 1))
+	fi
+	if [[ "$var" =~ ^-h$ ]]
+	then H=1
+	fi
+done
+
+if [ $H -eq 1 ]
+then usage
+fi
+
+if [ $VQ -ne 4 ]
+then
+	echo "ERROR: Illegal number of parameters"
+	echo "usage: subdb <i:program> <i:subsetFile> <i:DB> <o:DB> [options]"
+	false
+	exit 1
+fi
+
+PRG=$1
+SUB=$2
+IDB=$3
+ODB=$4
+
+OPTIND=5
+MOD=0
+DBK=1
+VER=3
+MMSEQS=mmseqs
+FOLDSEEK=foldseek
+
+while getopts :s:i:v:h OPT
+do
+	case $OPT in
+		s) MOD=$OPTARG;;
+		i) DBK=$OPTARG;;
+		v) VER=$OPTARG;;
+		m) MMSEQS=$OPTARG;;
+		f) FOLDSEEK=$OPTARG;;
+		h) usage;;
+		\?) ;;
+	esac
+done
+
+# check input
+if ! [ "$PRG" == "mmseqs" ] && ! [ "$PRG" == "foldseek" ]
+then
+	echo "Invalid program given (mmseqs/foldseek)"
+	false
+	exit 1
+elif [ ! -f "$SUB" ]
+then
+	echo "Subset file not found"
+	false
+	exit 1
+elif [ ! -f "$IDB" ]
+then
+	echo "Input DB not found"
+	false
+	exit 1
+fi
+
+# mmseqs
+if [ "$PRG" == "mmseqs" ]
+then
+	$MMSEQS createsubdb $SUB $IDB $ODB --subdb-mode $MOD --id-mode $DBK -v $VER
+else # foldseek
+	# create key table
+	if [ $DBK -eq 1 ]
+	then
+		awk 'NR == FNR {f[$1] = $1; next} $2 in f {print $1}' $SUB ${IDB}.lookup > .lookup
+		SUB=".lookup"
+		DBK=0
+	fi
+
+	# createsubdb
+	$FOLDSEEK createsubdb $SUB $IDB $ODB --subdb-mode $MOD --id-mode $DBK -v $VER
+	$FOLDSEEK createsubdb $SUB ${IDB}_ss ${ODB}_ss --subdb-mode $MOD --id-mode $DBK -v $VER
+	$FOLDSEEK lndb ${IDB}_ca ${ODB}_ca_tmp -v $VER
+	mv ${ODB}_ca_tmp.dbtype ${ODB}_ca_tmp.dbtype_tmp
+	cp ${IDB}.dbtype ${ODB}_ca_tmp.dbtype
+	$FOLDSEEK createsubdb $SUB ${ODB}_ca_tmp ${ODB}_ca --subdb-mode $MOD --id-mode $DBK -v $VER
+	cp ${ODB}_ca_tmp.dbtype_tmp ${ODB}_ca.dbtype
+
+	# clean
+	$FOLDSEEK rmdb ${ODB}_ca_tmp -v $VER
+	rm ${ODB}_ca_tmp.dbtype_tmp
+	if [ -f .lookup ]
+	then
+		rm .lookup
+	fi
+fi
