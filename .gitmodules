@@ -7,3 +7,6 @@
 [submodule "unicore"]
 	path = unicore
 	url = git@github.com:steineggerlab/unicore.git
+[submodule "Foldtree_ProstT5"]
+	path = Foldtree_ProstT5
+	url = git@github.com:DessimozLab/Foldtree_ProstT5.git
