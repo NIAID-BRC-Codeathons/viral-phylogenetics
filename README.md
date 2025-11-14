@@ -266,11 +266,10 @@ python merge_and_save_model.py \
 | Script | Purpose | Input | Output |
 |--------|---------|-------|--------|
 | `split_fastas.py` | Split full dataset | Full AA/3Di FASTAs | train/valid FASTAs |
-| `create_small_dataset.py` | Create smaller subsets | train/valid FASTAs | Smaller train/valid FASTAs |
+| `create_dataset_5k_1k.sh` | Create smaller subsets | train/valid FASTAs | Smaller train/valid FASTAs |
 | `finetune_prostt5_5k_1k.sh` | Fine-tune model | train/valid FASTAs | LoRA weights (.pth) |
 | `merge_and_save_model.py` | Merge LoRA weights | LoRA weights (.pth) | Complete HuggingFace model |
 | `run_inference.sh` | Run inference | LoRA weights (.pth) + AA FASTAs | Predicted 3Di sequences |
-| `inference_finetuned_prostt5.py` | Run inference (Python) | LoRA weights (.pth) + AA FASTAs | Predicted 3Di sequences |
 
 ---
 
@@ -290,22 +289,6 @@ Activate your conda environment:
 ```bash
 conda activate prostt5  # or your environment name
 ```
-
----
-
-## Troubleshooting
-
-### Model Loading Issues
-
-- **"ImportError: cannot import name 'PT5_classification_model'"**: The model classes are nested in `main()`. Use `merge_and_save_model.py` which has them extracted.
-
-### Port Conflicts
-
-- **"address already in use"**: Set different `MASTER_PORT` values in shell scripts when running multiple training jobs in parallel.
-
-### Inference Issues
-
-- **"TypeError: seq must be a Seq or MutableSeq object"**: The inference script now uses `Seq()` objects. Make sure you have the latest version.
 
 ---
 
