@@ -1,0 +1,14 @@
+unicore_5c29d6477b	KJ473806.1
+unicore_ec68b3537c	OQ297728.1
+unicore_a99a5a7eed	MZ328303.1
+unicore_652cd78421	MK720944.1
+unicore_b7529200f9	JX503060.1
+unicore_eeb0393b07	OP700657.1
+unicore_b38e5ac033	OL410609.1
+unicore_4c3831ee1b	PQ187626.1
+unicore_07afbc4b00	KP143508.1
+unicore_c40e1e0530	KX512810.1
+unicore_45b92c4daf	PQ577592.1
+unicore_219f8d99f8	MF167434.1
+unicore_ec78bd80d3	JX088695.1
+unicore_fbb94b3b36	MT820625.1

@@ -1,0 +1,127 @@
+IQ-TREE multicore version 2.4.0 for Linux x86 64-bit built Feb 12 2025
+Developed by Bui Quang Minh, Nguyen Lam Tung, Olga Chernomor, Heiko Schmidt,
+Dominik Schrempf, Michael Woodhams, Ly Trong Nhan, Thomas Wong
+
+Host:    dnagpu002 (AVX2, FMA3, 503 GB RAM)
+Command: iqtree -s unicore/ribo-untrained/tree/combined.fasta --prefix unicore/ribo-untrained/tree/iqtree -T 8 --quiet -m JTT+F+I+G -B 1000
+Seed:    643767 (Using SPRNG - Scalable Parallel Random Number Generator)
+Time:    Fri Nov 14 17:30:55 2025
+Kernel:  AVX+FMA - 8 threads (8 CPU cores detected)
+
+Reading alignment file unicore/ribo-untrained/tree/combined.fasta ... Fasta format detected
+Reading fasta file: done in 0.00369072 secs using 93.26% CPU
+Alignment most likely contains protein sequences
+Alignment has 101 sequences with 2734 columns, 2732 distinct patterns
+2727 parsimony-informative, 4 singleton sites, 3 constant sites
+             Gap/Ambiguity  Composition  p-value
+Analyzing sequences: done in 0.000168715 secs using 407.8% CPU
+   1  UP000678011   78.42%    failed      0.00%
+   2  UP000102095   82.99%    passed     51.45%
+   3  UP000172887   62.73%    failed      0.00%
+   4  UP000162623   62.73%    failed      0.02%
+   5  UP001054874   81.13%    passed     21.53%
+   6  UP000152374   37.13%    failed      0.00%
+   7  UP000148249   37.05%    failed      0.00%
+   8  UP000006719   68.29%    failed      0.00%
+   9  UP000002239   36.98%    passed     15.52%
+  10  UP000001675   69.97%    failed      0.49%
+  11  UP001055065   66.57%    failed      0.00%
+  12  UP000095968   85.19%    failed      2.82%
+  13  UP000887920   79.19%    failed      0.06%
+  14  UP001157328   78.16%    failed      0.00%
+  15  UP000006720   82.04%    failed      0.19%
+  16  UP000103430   80.18%    failed      0.02%
+  17  UP000007663   37.71%    failed      0.00%
+  18  UP000232681   78.35%    failed      0.00%
+  19  UP000502187   85.44%    passed     14.60%
+  20  UP000160764   86.58%    failed      3.03%
+  21  UP000500822   37.20%    failed      0.00%
+  22  UP000202728   37.05%    failed      0.00%
+  23  UP000202810   37.13%    failed      0.00%
+  24  UP000201363   78.05%    failed      0.00%
+  25  UP001055392   83.28%    passed      5.85%
+  26  UP000676204   78.49%    failed      0.00%
+  27  UP000501480   80.18%    failed      0.07%
+  28  UP000114561   40.93%    failed      0.00%
+  29  UP000203192   45.03%    failed      0.01%
+  30  UP000204133   25.13%    failed      0.00%
+  31  UP000001677   37.97%    failed      0.00%
+  32  UP000000734   81.71%    failed      2.55%
+  33  UP000676181   78.49%    failed      0.00%
+  34  UP000101879   80.18%    failed      0.01%
+  35  UP000001051   81.49%    passed      9.36%
+  36  UP000290719   78.05%    failed      1.56%
+  37  UP000146054   41.29%    failed      1.18%
+  38  UP000000832   39.43%    failed      0.00%
+  39  UP000266127   81.35%    failed      0.02%
+  40  UP000232618   48.35%    failed      0.00%
+  41  UP000501449   85.37%    failed      0.07%
+  42  UP000501748   78.60%    failed      0.00%
+  43  UP000154509   81.42%    failed      0.01%
+  44  UP000115085   40.56%    failed      4.46%
+  45  UP000119730   40.89%    failed      3.28%
+  46  UP000111934   43.12%    failed      0.00%
+  47  UP000000349   89.10%    passed     81.80%
+  48  UP000204084   40.01%    failed      3.19%
+  49  UP000232887   83.28%    failed      0.00%
+  50  UP000099533   39.36%    failed      0.57%
+  51  UP000240302   81.82%    failed      0.25%
+  52  UP000232682   83.03%    failed      1.04%
+  53  UP000103080   40.53%    passed     13.70%
+  54  UP000002610   81.82%    passed      8.40%
+  55  UP000201555   85.19%    passed      5.30%
+  56  UP000203837   85.59%    passed      7.04%
+  57  UP000111110   84.75%    failed      3.14%
+  58  UP000204677   83.28%    failed      2.84%
+  59  UP000108888   84.97%    failed      0.00%
+  60  UP000201558   84.86%    failed      0.14%
+  61  UP000202877   40.75%    failed      0.84%
+  62  UP000217341   84.71%    passed     55.41%
+  63  UP000232845   83.25%    failed      0.00%
+  64  UP000232757   83.80%    failed      0.01%
+  65  UP000203679   40.82%    failed      0.00%
+  66  UP000201276   83.28%    passed      8.03%
+  67  UP000234780   83.28%    failed      3.21%
+  68  UP000201659   39.39%    passed     39.67%
+  69  UP000204532   49.16%    failed      0.00%
+  70  UP000676981   83.28%    failed      0.82%
+  71  UP000201896   39.83%    passed      5.13%
+  72  UP000202423   83.14%    passed      5.72%
+  73  UP001267755   46.38%    failed      0.02%
+  74  UP000154153   39.80%    failed      0.01%
+  75  UP000246735   83.28%    failed      0.00%
+  76  UP000151058   84.89%    passed     26.32%
+  77  UP000502394   83.72%    failed      0.51%
+  78  UP000203081   40.71%    failed      0.00%
+  79  UP000202675   83.28%    failed      0.17%
+  80  UP000202715   83.25%    failed      0.94%
+  81  UP000241860   81.82%    passed      8.96%
+  82  UP000000733   81.82%    failed      0.14%
+  83  UP000007662   40.89%    passed     13.04%
+  84  UP000201382   83.28%    failed      0.02%
+  85  UP000202024   40.16%    failed      0.00%
+  86  UP000203299   40.49%    failed      0.28%
+  87  UP000232786   85.15%    failed      1.82%
+  88  UP000203827   39.17%    passed     41.32%
+  89  UP000204414   84.60%    passed      7.51%
+  90  UP000243013   67.78%    failed      0.00%
+  91  UP000007664   62.87%    failed      0.00%
+  92  UP000001119   63.02%    failed      0.01%
+  93  UP000202863   54.65%    failed      0.00%
+  94  UP000274817   68.00%    failed      0.00%
+  95  UP000121369   55.82%    failed      0.00%
+  96  UP000000348   58.19%    failed      1.83%
+  97  UP000202712   60.83%    failed      0.05%
+  98  UP000201545   59.44%    passed     16.32%
+  99  UP000130686   68.00%    failed      0.00%
+ 100  UP000203852   67.08%    failed      4.34%
+ 101  UP000117356   68.00%    failed      0.00%
+WARNING: 69 sequences contain more than 50% gaps/ambiguity
+****  TOTAL         65.90%  79 sequences failed composition chi2 test (p-value<5%; df=19)
+
+Create initial parsimony tree by phylogenetic likelihood library (PLL)... 0.219 seconds
+Generating 1000 samples for ultrafast bootstrap (seed: 643767)...
+
+NOTE: 182 MB RAM (0 GB) is required!
+Estimate model parameters (epsilon = 0.100)
+Thoroughly optimizing +I+G parameters from 10 start values...
