@@ -1,0 +1,5 @@
+*.log
+/model
+/test_prostt5_lora*
+/merged_prostt5_model*
+/misc
