@@ -13,4 +13,4 @@ python finetune_prostt5_lora_script.py \
     --validaafasta valid_aa.faa \
     --validthreedifasta valid_3di.faa \
     -o test_prostt5_lora -b 1 \
-    --finetune_name prostt5_finetuned_model -f 2>&1 | tee finetune_prostt5_log.txt
+    --finetune_name prostt5_finetuned_model -f 2>&1 | tee finetune_prostt5.log
